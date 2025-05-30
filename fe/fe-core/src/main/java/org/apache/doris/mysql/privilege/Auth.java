@@ -20,6 +20,7 @@ package org.apache.doris.mysql.privilege;
 import org.apache.doris.alter.AlterUserOpType;
 import org.apache.doris.analysis.AlterRoleStmt;
 import org.apache.doris.analysis.AlterUserStmt;
+import org.apache.doris.analysis.CompoundPredicate;
 import org.apache.doris.analysis.CreateRoleStmt;
 import org.apache.doris.analysis.CreateUserStmt;
 import org.apache.doris.analysis.DropRoleStmt;
@@ -100,6 +101,7 @@ import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 
@@ -278,12 +280,14 @@ public class Auth implements Writable {
         readLock();
         try {
             Set<Role> roles = getRolesByUserWithLdap(currentUser);
-            for (Role role : roles) {
-                if (role.checkGlobalPriv(wanted)) {
-                    return true;
+            return checkPriWithMultiRoles(wanted, (privPredicate) -> {
+                for (Role role : roles) {
+                    if (role.checkGlobalPriv(privPredicate)) {
+                        return true;
+                    }
                 }
-            }
-            return false;
+                return false;
+            });
         } finally {
             readUnlock();
         }
@@ -301,12 +305,14 @@ public class Auth implements Writable {
         readLock();
         try {
             Set<Role> roles = getRolesByUserWithLdap(currentUser);
-            for (Role role : roles) {
-                if (role.checkCtlPriv(ctl, wanted)) {
-                    return true;
+            return checkPriWithMultiRoles(wanted, (privPredicate) -> {
+                for (Role role : roles) {
+                    if (role.checkCtlPriv(ctl, privPredicate)) {
+                        return true;
+                    }
                 }
-            }
-            return false;
+                return false;
+            });
         } finally {
             readUnlock();
         }
@@ -324,12 +330,14 @@ public class Auth implements Writable {
         readLock();
         try {
             Set<Role> roles = getRolesByUserWithLdap(currentUser);
-            for (Role role : roles) {
-                if (role.checkDbPriv(ctl, db, wanted)) {
-                    return true;
+            return checkPriWithMultiRoles(wanted, (privPredicate) -> {
+                for (Role role : roles) {
+                    if (role.checkDbPriv(ctl, db, privPredicate)) {
+                        return true;
+                    }
                 }
-            }
-            return false;
+                return false;
+            });
         } finally {
             readUnlock();
         }
@@ -347,12 +355,14 @@ public class Auth implements Writable {
         readLock();
         try {
             Set<Role> roles = getRolesByUserWithLdap(currentUser);
-            for (Role role : roles) {
-                if (role.checkTblPriv(ctl, db, tbl, wanted)) {
-                    return true;
+            return checkPriWithMultiRoles(wanted, (privPredicate) -> {
+                for (Role role : roles) {
+                    if (role.checkTblPriv(ctl, db, tbl, privPredicate)) {
+                        return true;
+                    }
                 }
-            }
-            return false;
+                return false;
+            });
         } finally {
             readUnlock();
         }
@@ -375,6 +385,7 @@ public class Auth implements Writable {
 
     private boolean checkColPriv(String ctl, String db, String tbl,
             String col, PrivPredicate wanted, Set<Role> roles) {
+        //col priv is special,will change to select_priv or load_priv, so no need to use checkWithMultiRole
         for (Role role : roles) {
             if (role.checkColPriv(ctl, db, tbl, col, wanted)) {
                 return true;
@@ -388,12 +399,14 @@ public class Auth implements Writable {
         readLock();
         try {
             Set<Role> roles = getRolesByUserWithLdap(currentUser);
-            for (Role role : roles) {
-                if (role.checkResourcePriv(resourceName, wanted)) {
-                    return true;
+            return checkPriWithMultiRoles(wanted, (privPredicate) -> {
+                for (Role role : roles) {
+                    if (role.checkResourcePriv(resourceName, privPredicate)) {
+                        return true;
+                    }
                 }
-            }
-            return false;
+                return false;
+            });
         } finally {
             readUnlock();
         }
@@ -404,12 +417,14 @@ public class Auth implements Writable {
         readLock();
         try {
             Set<Role> roles = getRolesByUserWithLdap(currentUser);
-            for (Role role : roles) {
-                if (role.checkStorageVaultPriv(storageVaultName, wanted)) {
-                    return true;
+            return checkPriWithMultiRoles(wanted, (privPredicate) -> {
+                for (Role role : roles) {
+                    if (role.checkStorageVaultPriv(storageVaultName, privPredicate)) {
+                        return true;
+                    }
                 }
-            }
-            return false;
+                return false;
+            });
         } finally {
             readUnlock();
         }
@@ -426,12 +441,14 @@ public class Auth implements Writable {
             }
 
             Set<Role> roles = getRolesByUserWithLdap(currentUser);
-            for (Role role : roles) {
-                if (role.checkWorkloadGroupPriv(workloadGroupName, wanted)) {
-                    return true;
+            return checkPriWithMultiRoles(wanted, (privPredicate) -> {
+                for (Role role : roles) {
+                    if (role.checkWorkloadGroupPriv(workloadGroupName, privPredicate)) {
+                        return true;
+                    }
                 }
-            }
-            return false;
+                return false;
+            });
         } finally {
             readUnlock();
         }
@@ -449,14 +466,46 @@ public class Auth implements Writable {
                 }
             }
             Set<String> roles = userRoleManager.getRolesByUser(currentUser);
-            for (String roleName : roles) {
-                if (roleManager.getRole(roleName).checkCloudPriv(cloudName, wanted, type)) {
+            return checkPriWithMultiRoles(wanted, (privPredicate) -> {
+                for (String roleName : roles) {
+                    if (roleManager.getRole(roleName).checkCloudPriv(cloudName, privPredicate, type)) {
+                        return true;
+                    }
+                }
+                return false;
+            });
+        } finally {
+            readUnlock();
+        }
+    }
+
+    /**
+     * when wanted privs is in different roles, single role is not satisfied,but all roles may satisfy.
+     * example: the role1 has select_priv, the role2 has grant_priv, the wanted privs are select_priv && grant_priv,
+     *          neither role1 nor role2 is satisfied, but (role1 && role2) is satisfied.
+     * so can not check by for-loop simply
+     * */
+    private boolean checkPriWithMultiRoles(PrivPredicate wanted, Function<PrivPredicate, Boolean> function) {
+        //only and-operator should check by split PrivPredicate
+        if (wanted.getOp() == CompoundPredicate.Operator.AND) {
+            List<Privilege> privileges = wanted.getPrivs().toPrivilegeList();
+            long expected = (2L << (privileges.size() - 1)) - 1;
+            long actual = 0L;
+            for (int i = 0; i < privileges.size(); i++) {
+                PrivPredicate singleWanted = PrivPredicate.of(PrivBitSet.of(privileges.get(i)), wanted.getOp());
+                boolean singlePriCheckRet = function.apply(singleWanted);
+                if (singlePriCheckRet) {
+                    actual |= (1L << i);
+                } else {
+                    actual &= ~(1L << i);
+                }
+                if (expected == actual) {
                     return true;
                 }
             }
             return false;
-        } finally {
-            readUnlock();
+        } else {
+            return function.apply(wanted);
         }
     }
 
