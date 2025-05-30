@@ -211,6 +211,19 @@ public class RoleManager implements Writable, GsonPostProcessable {
                         }
                         info.add(infoItem);
                     });
+
+            //add column priv
+            List<String> colPrivs = Lists.newArrayList();
+            for (Entry<ColPrivilegeKey, Set<String>> entry : role.getColPrivMap().entrySet()) {
+                colPrivs.add(String.format("%s.%s.%s: %s%s", entry.getKey().getCtl(), entry.getKey().getDb(),
+                    entry.getKey().getTbl(), entry.getKey().getPrivilege(), entry.getValue()));
+            }
+            if (colPrivs.isEmpty()) {
+                info.add(FeConstants.null_string);
+            } else {
+                info.add(Joiner.on("; ").join(colPrivs));
+            }
+
             results.add(info);
         }
     }
